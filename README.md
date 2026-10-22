@@ -117,6 +117,48 @@ does not shift the global RNG stream, and neither does a replay. So this is a ru
 measurement, not an explanation — and it is the right rule regardless, because a shape seen once
 per utterance does not deserve a graph and is exactly where side effects hide.
 
+## Quantization: the one thing here that changes the output
+
+Separate from `accelerate`, and deliberately so. Everything above is bit-identical by
+construction; this is not. It stores different numbers, the waveform moves, and no bench can
+say whether it moved too far — only listening can.
+
+```python
+from faster_voxcpm.quantize import quantize_language_models
+
+quantize_language_models(model)   # BEFORE accelerate(): the graphs capture
+accelerate(model)                 # whatever the model does at capture time
+```
+
+81% of the weights sit in the two language models, and the flow head — the part that carries
+the voice, and the part the graphs accelerate — is 9%. So the split is ideal: compress the big
+dull part, leave the small delicate part alone.
+
+| | bf16 | NF4 |
+|---|---|---|
+| process VRAM | 6741 MB | **4703 MB** |
+| `base_lm` (196 linears) | 2807 MB | 917 MB |
+| `residual_lm` (56 linears) | 720 MB | 180 MB |
+| `feat_decoder`, `feat_encoder`, VAE | untouched | untouched |
+| median real time | 1.31x | **1.35x** |
+
+Two gigabytes back, and the speed went *up* slightly rather than down — which was not a given:
+int8 on a sibling model once bought 38 MB for half the throughput. Different regime; here the
+weights genuinely dominated. The CUDA graphs still capture over the 4-bit kernels.
+
+Process VRAM is measured with the Windows per-process GPU counter, not
+`torch.cuda.max_memory_allocated` — the latter ignores the CUDA context, the cuBLAS workspaces
+and the allocator reserve, and the gap was 566 MB on a sibling model. The number that matters
+is the one that decides whether the model fits beside something else.
+
+```bash
+python bench/quantize.py --weights ... --reference ... --out /tmp/q --mode bf16
+python bench/quantize.py --weights ... --reference ... --out /tmp/q --mode nf4
+```
+
+One mode per process, on purpose: running both in one makes the memory number meaningless,
+because the first model's allocator reserve never goes back to the driver.
+
 ## The trap, for anyone capturing their own graphs
 
 A CUDA graph records **addresses, not values**. Every tensor it reads must stay alive for as
@@ -162,10 +204,8 @@ no 4.7 GB checkpoint on disk.
 ## What this does not do
 
 - **It does not change the voice.** Same weights, same output, same quality.
-- **It does not shrink the model.** Peak memory is 5.7 GB and the graphs add 40 MB. 81% of the
-  weights sit in the two language models (`base_lm` 2807 MB, `residual_lm` 720 MB) against
-  404 MB for the flow head, so weight quantization is a separate and complementary lever — and
-  one that would want measuring on both axes, since int8 at batch 1 can be slower than bf16.
+- **The graphs do not shrink the model** — they add 40 MB. Quantization is a separate call,
+  below.
 - **It does not stream.** Upstream has `generate_streaming()`; nothing here touches it, and
   the graphs should apply, but that is untested.
 - **Batch size 1**, which is what the decode loop does anyway.
