@@ -35,7 +35,12 @@ def model():
         pytest.skip("no CUDA device")
     from voxcpm import VoxCPM
 
-    return VoxCPM.from_pretrained(WEIGHTS)
+    model = VoxCPM.from_pretrained(WEIGHTS, optimize=False)
+    # Upstream's first generate() in a process differs from every later one
+    # under the same seed, with no graft involved. `optimize=True` hid this,
+    # because its warmup render took that first call. So take it here.
+    model.generate(text="Hello.", reference_wav_path=REFERENCE)
+    return model
 
 
 def render(model, text):

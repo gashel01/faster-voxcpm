@@ -28,13 +28,20 @@ That is also what the most thoughtful community GGUF build does
 (`voxcpm2-q8_0-locdit-f16.gguf`), and its saving, 1856 MB against the f16
 build, is exactly what 8-bit on these two stacks predicts.
 
-NF4 RATHER THAN INT8, BECAUSE THE GOAL IS MEMORY
+FOUR BITS OR EIGHT, AND THE ANSWER CHANGED ONCE IT WAS HEARD
 
 Four-bit NF4 divides the stored weights by four: the two stacks go from
-3527 MB to about 880 MB. Int8 would halve them instead. With memory as the
-objective and speed as a bonus, four bits is the stronger play — and there is
-a measured reason to distrust int8 as a *speed* move anyway: on Ming-3.0-tts
-it bought 38 MB for half the throughput.
+3527 MB to about 880 MB. Int8 halves them instead. With memory as the
+objective, four bits was the obvious play, and on neutral sentences the two
+were judged indistinguishable.
+
+**With a delivery instruction they are not.** The same neutral sentence under
+six instructions moved its duration by 1.92 s in bf16 and only 1.12 s in NF4 —
+and the ear agreed that bf16 "joue plus". Four bits appears to flatten the
+acting, which is the one thing this engine is being kept for.
+
+So both are offered, `quant_type="int8"` gives back about half of what four
+bits saved, and the choice is a listening decision rather than a number.
 
 ORDER MATTERS: QUANTIZE, THEN GRAPH
 
@@ -51,9 +58,38 @@ import torch
 LANGUAGE_MODELS = ("base_lm", "residual_lm")
 
 
+def _int8_linear(linear):
+    """One `nn.Linear` as an 8-bit one.
+
+    Here because four bits was heard to flatten the delivery — the same
+    sentence under six instructions moved its duration by 1.92 s in bf16 and
+    only 1.12 s in NF4, and the ear agreed. Eight bits gives back about half
+    the memory four bits saved and keeps more of the amplitude, which is the
+    trade this engine is being kept for in the first place.
+    """
+    from bitsandbytes.nn import Int8Params, Linear8bitLt
+
+    replacement = Linear8bitLt(
+        linear.in_features, linear.out_features,
+        bias=linear.bias is not None, has_fp16_weights=False,
+    )
+    # Through the CPU on purpose: `Int8Params` quantizes on its first move to
+    # the device, so it has to start somewhere else.
+    replacement.weight = Int8Params(
+        linear.weight.data.detach().to("cpu", torch.float16),
+        requires_grad=False, has_fp16_weights=False,
+    )
+    if linear.bias is not None:
+        replacement.bias = torch.nn.Parameter(
+            linear.bias.data.detach().clone(), requires_grad=False)
+    return replacement.to(linear.weight.device)
+
+
 def _quantized_linear(linear, quant_type, compute_dtype):
-    """One `nn.Linear` as a 4-bit one, carrying its weights across."""
-    import bitsandbytes as bnb
+    """One `nn.Linear`, compressed. Four bits by default, eight on request."""
+    if quant_type == "int8":
+        return _int8_linear(linear)
+
     from bitsandbytes.nn import Linear4bit, Params4bit
 
     replacement = Linear4bit(
@@ -70,7 +106,6 @@ def _quantized_linear(linear, quant_type, compute_dtype):
     if linear.bias is not None:
         replacement.bias = torch.nn.Parameter(
             linear.bias.data.detach().clone(), requires_grad=False)
-    del bnb
     return replacement.to(linear.weight.device)
 
 

@@ -58,7 +58,7 @@ def main() -> int:
 
     print(f"{torch.cuda.get_device_name(0)} - torch {torch.__version__} - "
           f"faster-voxcpm {faster_voxcpm.__version__}")
-    model = VoxCPM.from_pretrained(args.weights)
+    model = VoxCPM.from_pretrained(args.weights, optimize=False)
     rate = int(getattr(model.tts_model, "sample_rate", 48000))
 
     def render(text):
@@ -68,6 +68,13 @@ def main() -> int:
         torch.cuda.synchronize()
         return (np.asarray(wav, dtype=np.float32).reshape(-1),
                 time.perf_counter() - start)
+
+    # Upstream's first generate() in a process differs from every later one
+    # under the same seed, with no graft involved -- measured. `optimize=True`
+    # used to hide it, because its warmup render took that first call. Without
+    # this throwaway, the first case and the undo() check compare against an
+    # output upstream itself never reproduces.
+    render(CASES[0][1])
 
     torch.cuda.reset_peak_memory_stats()
     print("\nupstream", flush=True)

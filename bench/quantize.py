@@ -84,7 +84,7 @@ def main() -> int:
     ap.add_argument("--weights", required=True)
     ap.add_argument("--reference", required=True)
     ap.add_argument("--out", required=True, help="folder for the wav files")
-    ap.add_argument("--mode", default="bf16", choices=("bf16", "nf4", "fp4"),
+    ap.add_argument("--mode", default="bf16", choices=("bf16", "nf4", "fp4", "int8"),
                     help="one configuration per process; run it twice")
     ap.add_argument("--seed", type=int, default=123)
     args = ap.parse_args()
@@ -100,7 +100,7 @@ def main() -> int:
 
     print(f"{torch.cuda.get_device_name(0)} - torch {torch.__version__}")
 
-    model = VoxCPM.from_pretrained(args.weights)
+    model = VoxCPM.from_pretrained(args.weights, optimize=False)
     rate = int(getattr(model.tts_model, "sample_rate", 48000))
 
     print(f"\nmode {args.mode}", flush=True)

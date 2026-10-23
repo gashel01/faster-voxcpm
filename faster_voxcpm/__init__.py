@@ -3,7 +3,7 @@
     from voxcpm import VoxCPM
     from faster_voxcpm import accelerate
 
-    model = VoxCPM.from_pretrained("/path/to/VoxCPM2")
+    model = VoxCPM.from_pretrained("/path/to/VoxCPM2", optimize=False)
     accelerate(model)              # that is the whole integration
 
     wav = model.generate(text="...", reference_wav_path="reference.wav")
@@ -107,6 +107,29 @@ def _find_cfm(model):
 STACKS = ("base_lm", "residual_lm", "feat_encoder")
 
 
+def _compiled_entry_points(tts) -> list[str]:
+    """Which of upstream's `optimize()` wrappers are in place.
+
+    `from_pretrained` defaults to `optimize=True`, which wraps the same entry
+    points this package grafts in `torch.compile`. Without Triton it gives up
+    before assigning anything, which is why most Windows installs run eager and
+    the graft just works. With Triton it succeeds, and grafting on top of it
+    would capture graphs around Inductor's own graphs, while `undo()` would put
+    back the uncompiled method rather than what was there.
+    """
+    found = []
+    for name in ("base_lm", "residual_lm"):
+        step = getattr(getattr(tts, name, None), "forward_step", None)
+        if hasattr(step, "_torchdynamo_orig_callable"):
+            found.append(f"{name}.forward_step")
+    if hasattr(tts, "_feat_encoder_raw"):
+        found.append("feat_encoder")
+    estimator = getattr(getattr(tts, "feat_decoder", None), "estimator", None)
+    if hasattr(estimator, "_orig_mod"):
+        found.append("feat_decoder.estimator")
+    return found
+
+
 def accelerate(model, sampler: bool = True, stacks=STACKS) -> Graft:
     """Graft the graphs onto an already-loaded VoxCPM2.
 
@@ -125,6 +148,15 @@ def accelerate(model, sampler: bool = True, stacks=STACKS) -> Graft:
     """
     wanted = set(stacks or ())
     tts = getattr(model, "tts_model", model)
+    compiled = _compiled_entry_points(tts)
+    if compiled:
+        raise RuntimeError(
+            "this model was compiled by upstream's optimize() ("
+            + ", ".join(compiled) + "). Load it with "
+            "VoxCPM.from_pretrained(..., optimize=False) before accelerate(): "
+            "the graft replaces the same entry points, and on top of "
+            "torch.compile it would capture graphs around Inductor's graphs. "
+            "It also skips a compile that takes minutes.")
     parts = []
 
     if sampler:

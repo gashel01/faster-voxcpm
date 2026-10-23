@@ -1,7 +1,8 @@
 # faster-voxcpm
 
-[VoxCPM2](https://github.com/OpenBMB/VoxCPM) inference, **2.7x faster**, with a waveform
-**identical to the bit**.
+[VoxCPM2](https://github.com/OpenBMB/VoxCPM) inference, **about 3x faster**, with a waveform
+**identical to the bit**, and **1.9x faster than upstream's own `torch.compile` path** on
+Windows, which changes the waveform and takes six minutes to warm up.
 
 No retraining, no quantization, no rewritten model. Four entry points are captured in CUDA
 graphs and replayed; a graph changes no kernel, no weight and no shape, only the dispatch.
@@ -10,7 +11,7 @@ graphs and replayed; a graph changes no kernel, no weight and no shape, only the
 from voxcpm import VoxCPM
 from faster_voxcpm import accelerate
 
-model = VoxCPM.from_pretrained("/path/to/VoxCPM2")
+model = VoxCPM.from_pretrained("/path/to/VoxCPM2", optimize=False)
 accelerate(model)              # that is the whole integration
 
 wav = model.generate(text="...", reference_wav_path="reference.wav")
@@ -38,6 +39,46 @@ does not vary.
 Bit identity is the point, not a bonus. A faster voice engine that does not produce the same
 waveform is a different model, so [`bench/verify.py`](bench/verify.py) checks the waveform
 before it looks at the clock — and it is what caught the one stage that had to be rolled back.
+
+## Against upstream's own `optimize=True`
+
+`VoxCPM.from_pretrained` defaults to `optimize=True`, which wraps the same four entry points in
+`torch.compile(mode="reduce-overhead")`: CUDA graphs plus Inductor's kernel fusion. It needs
+Triton. **Without Triton, upstream prints a warning and silently runs eager**, which is what the
+table above compares against and what most Windows installs actually run. So the fair question
+is the harder one: faster than upstream at its best?
+
+[`bench/vs_compile.py`](bench/vs_compile.py) answers it, one mode per process, every case
+warmed first, median of three renders. Same laptop, `triton-windows` 3.2.0 in a separate
+environment so that upstream's compile genuinely engages:
+
+| case | audio | eager | upstream compiled | faster-voxcpm |
+|---|---|---|---|---|
+| short, fr | 2.56 s | 0.43x | 0.71x, *different* | **1.31x, identical** |
+| long, fr | 6.88 s | 0.43x | 0.71x, *different* | **1.35x, identical** |
+| english | 2.24 s | 0.42x | 0.71x, *different* | **1.29x, identical** |
+| spanish | 3.20 s | 0.43x | 0.70x, *different* | **1.33x, identical** |
+| style instruction | 5.60 s | 0.43x | 0.71x, *different* | **1.34x, identical** |
+
+Real time factor, higher is faster; "identical" means to the bit against eager.
+
+| | eager | upstream compiled | faster-voxcpm |
+|---|---|---|---|
+| median speed over eager | 1.00x | 1.65x | **3.11x** |
+| ready to speak (load, compile or capture, warmup) | 120 s | **360 s** | 60 s |
+| peak memory (torch) | 5,647 MB | 6,294 MB | 5,726 MB |
+
+Inductor's fusion reorders arithmetic, so its waveform moves — on the long sentence it even
+produced 5.92 s of audio instead of 6.88 s. A graph without fusion moves nothing.
+
+**What this does not settle: Linux.** Launching a kernel costs two to three times more under
+WDDM than on Linux, so the dispatch this package removes is worth less there, while Inductor's
+fusion is worth the same. On a Linux box upstream's compiled path may well come closer or win.
+Run the bench; it takes ten minutes.
+
+Load with `optimize=False` when you use this package. `accelerate()` refuses a model that
+upstream already compiled, and says so: the graft replaces the same entry points, and the
+compile it would discard takes minutes.
 
 ## Why it is this fast
 
@@ -142,6 +183,12 @@ dull part, leave the small delicate part alone.
 | `feat_decoder`, `feat_encoder`, VAE | untouched | untouched |
 | median real time | 1.31x | **1.35x** |
 
+Four bits flattens the acting, though. The same neutral sentence under six delivery
+instructions moved its duration by 1.92 s in bf16 and only 1.12 s in NF4, and the ear agreed
+that bf16 plays more. So eight bits is offered too, `quantize_language_models(model,
+quant_type="int8")`: process VRAM 5,379 MB, median 1.27x real time, graphs still captured over
+it. Which one to use is a listening decision, not a number.
+
 Two gigabytes back, and the speed went *up* slightly rather than down — which was not a given:
 int8 on a sibling model once bought 38 MB for half the throughput. Different regime; here the
 weights genuinely dominated. The CUDA graphs still capture over the 4-bit kernels.
@@ -186,7 +233,17 @@ python bench/verify.py  --weights /path/to/VoxCPM2 --reference /path/to/referenc
 python bench/profile_step.py --weights ... --reference ...
 python bench/profile_step.py --weights ... --reference ... --accelerate
 python bench/bisect_stages.py --weights ... --reference ...   # one stage at a time
+
+# against upstream's torch.compile path, which needs Triton (triton-windows on Windows)
+for m in eager compiled faster; do
+  python bench/vs_compile.py run --mode $m --weights ... --reference ... --out /tmp/vs
+done
+python bench/vs_compile.py compare --out /tmp/vs
 ```
+
+All of them take one throwaway render before measuring: upstream's first `generate()` in a
+process differs from every later one under the same seed, with no graft involved.
+`optimize=True` hid this, because its warmup render took that first call.
 
 `profile_step.py` starts by timing a trivial kernel launch, because without that floor "a step
 costs 70 ms" does not tell you whether you are compute-bound or dispatch-bound — and that is

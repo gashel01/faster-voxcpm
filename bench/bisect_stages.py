@@ -51,7 +51,7 @@ def main() -> int:
 
     import faster_voxcpm
 
-    model = VoxCPM.from_pretrained(args.weights)
+    model = VoxCPM.from_pretrained(args.weights, optimize=False)
 
     def render():
         torch.manual_seed(args.seed)
@@ -61,6 +61,7 @@ def main() -> int:
         return (np.asarray(wav, dtype=np.float32).reshape(-1),
                 time.perf_counter() - start)
 
+    render()  # upstream's first generate() in a process differs from the rest
     control, control_took = render()
     print(f"control: {control.size} samples in {control_took:.2f} s\n")
     print(f"{'combination':30} {'s':>6} {'gain':>6}  verdict")

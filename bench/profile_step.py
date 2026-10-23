@@ -78,7 +78,7 @@ def main() -> int:
     print(f"launch floor: {launch_floor():.1f} microseconds per trivial "
           f"kernel (Linux is typically 5-10, Windows/WDDM 12-18)")
 
-    model = VoxCPM.from_pretrained(args.weights)
+    model = VoxCPM.from_pretrained(args.weights, optimize=False)
     tts = model.tts_model
     if args.accelerate:
         import faster_voxcpm
